@@ -1,0 +1,21 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // PRIVADO: solo tú (por uid) lees y escribes tus movimientos
+    match /users/{uid}/{document=**} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // COMPARTIDO: se puede abrir con el ID (get) pero NO listar la colección
+    match /shared/{id} {
+      allow get: if true;
+      allow list: if false;
+      allow create: if request.auth != null && request.resource.data.ownerUid == request.auth.uid;
+      allow update: if (request.auth != null && resource.data.ownerUid == request.auth.uid)
+                    || (request.resource.data.diff(resource.data).affectedKeys().hasOnly(['shares'])
+                        && request.resource.data.shares.size() == resource.data.shares.size());
+      allow delete: if request.auth != null && resource.data.ownerUid == request.auth.uid;
+    }
+  }
+}
