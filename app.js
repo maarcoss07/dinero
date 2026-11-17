@@ -4,6 +4,7 @@ import { getFirestore, collection, addDoc, doc, getDoc, updateDoc, deleteDoc, wr
 import * as cfg from "./firebase-config.js";
 const firebaseConfig = cfg.firebaseConfig, OWNER_NAME = cfg.OWNER_NAME || "Tu amigo", BIZUM_PHONE = cfg.BIZUM_PHONE || "";
 
+window.appLoaded = true; // el módulo y sus imports cargaron: desactiva el salvavidas de index.html
 if (!firebaseConfig || !firebaseConfig.apiKey || firebaseConfig.apiKey === "TU_API_KEY") {
   document.getElementById('app').innerHTML = '<p style="padding:24px;font-family:sans-serif">Falta configurar Firebase: <b>firebase-config.js</b> debe empezar por <code>export const firebaseConfig = {</code> y llevar tus credenciales reales.</p>';
   throw new Error('firebaseConfig no definido o sin completar');
@@ -32,7 +33,7 @@ const sharedId = params.get('shared');
 if (sharedId) renderShared(sharedId, params.get('p'));
 else startPrivate();
 
-if ('serviceWorker' in navigator) addEventListener('load', () => navigator.serviceWorker.register('service-worker.js'));
+if ('serviceWorker' in navigator) addEventListener('load', () => navigator.serviceWorker.register('service-worker.js', { updateViaCache: 'none' }));
 
 /* =====================  VISTA PÚBLICA  ===================== */
 async function renderShared(id, p) {
