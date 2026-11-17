@@ -1,6 +1,6 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
-import { getFirestore, collection, addDoc, doc, getDoc, updateDoc, deleteDoc, query, orderBy, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+import { getFirestore, collection, addDoc, doc, getDoc, updateDoc, deleteDoc, writeBatch, increment, query, orderBy, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 import * as cfg from "./firebase-config.js";
 const firebaseConfig = cfg.firebaseConfig, OWNER_NAME = cfg.OWNER_NAME || "Tu amigo", BIZUM_PHONE = cfg.BIZUM_PHONE || "";
 
@@ -78,21 +78,25 @@ async function renderShared(id, p) {
 }
 
 /* =====================  ZONA PRIVADA  ===================== */
-let user = null, items = [], unsub = null;
+let user = null, items = [], students = [], unsub = null, sub = null, curSid = null, curEntries = [];
 
 function startPrivate() {
   onAuthStateChanged(auth, u => {
     unsub?.(); unsub = null; user = u;
-    if (!u) { items = []; return renderLogin(); }
+    if (!u) { items = []; students = []; return renderLogin(); }
     renderDash();
-    unsub = onSnapshot(query(collection(db, 'users', u.uid, 'transactions'), orderBy('date', 'desc')),
+    const u1 = onSnapshot(query(collection(db, 'users', u.uid, 'transactions'), orderBy('date', 'desc')),
       snap => { items = snap.docs.map(d => ({ id: d.id, ...d.data() })); paint(); },
       () => toast('Error al leer datos'));
+    const u2 = onSnapshot(collection(db, 'users', u.uid, 'students'),
+      snap => { students = snap.docs.map(d => ({ id: d.id, ...d.data() })); paintStudents(); renderProfile(); },
+      () => toast('Error al leer alumnos'));
+    unsub = () => { u1(); u2(); };
   });
 }
 
 function renderLogin() {
-  modal.innerHTML = '';
+  closeSheet();
   app.innerHTML = `<main class="p-6 min-h-screen flex flex-col justify-center">
     <h1 class="num text-4xl font-bold">Mis finanzas</h1>
     <p class="text-neutral-500 mt-1 mb-8">Inicia sesión para ver tus movimientos.</p>
@@ -126,15 +130,24 @@ function renderDash() {
         <div><p class="text-green-200"><i class="fa-solid fa-arrow-up"></i> Gastos del mes</p><p id="exp" class="num text-lg font-semibold">—</p></div>
       </div>
     </section>
+    <section class="mt-5 rounded-3xl bg-white p-4 shadow-sm">
+      <div class="flex items-center justify-between mb-3"><div><h2 class="num font-bold text-lg">Alumnos</h2><p id="owed" class="text-xs text-red-600 font-semibold"></p></div>
+        <button id="addst" class="px-3 py-1.5 rounded-xl bg-[#f3f1ec] font-semibold text-sm">+ Nuevo</button></div>
+      <ul id="stl" class="space-y-2"></ul>
+    </section>
     <h2 class="num font-bold mt-7 mb-3">Movimientos recientes</h2>
     <ul id="list" class="space-y-2"></ul>
   </main>
   <nav class="fixed bottom-0 inset-x-0 max-w-md mx-auto p-4 flex gap-3" style="padding-bottom:calc(1rem + env(safe-area-inset-bottom))">
-    <button data-new="expense" class="btn flex-1 bg-neutral-900 text-white shadow-lg"><i class="fa-solid fa-minus"></i> Añadir gasto</button>
-    <button data-new="income" class="btn flex-1 bg-white shadow-lg"><i class="fa-solid fa-plus"></i> Añadir ingreso</button>
+    <button id="navst" class="btn flex-1 flex-col !gap-0 !py-2.5 text-xs bg-[#14532d] text-white shadow-lg"><i class="fa-solid fa-graduation-cap text-lg"></i> Alumnos</button>
+    <button data-new="expense" class="btn flex-1 flex-col !gap-0 !py-2.5 text-xs bg-neutral-900 text-white shadow-lg"><i class="fa-solid fa-receipt text-lg"></i> Gastos / Split</button>
+    <button data-new="income" class="btn flex-1 flex-col !gap-0 !py-2.5 text-xs bg-white shadow-lg"><i class="fa-solid fa-plus text-lg"></i> Otros ingresos</button>
   </nav>`;
   $('#out').onclick = () => signOut(auth);
   $('#chb').onclick = openCharts;
+  $('#addst').onclick = () => openStudentForm();
+  $('#navst').onclick = openStudents;
+  $('#stl').onclick = e => { const b = e.target.closest('[data-sid]'); if (b) openStudent(b.dataset.sid); };
   app.querySelectorAll('[data-new]').forEach(b => b.onclick = () => openForm(b.dataset.new));
   $('#list').onclick = onListClick;
 }
@@ -143,6 +156,7 @@ const eff = t => t.type === 'income' ? t.amount : (t.myShare ?? t.amount);
 
 function paint() {
   if (!$('#list')) return;
+  paintStudents();
   const m = today().slice(0, 7);
   let bal = 0, inc = 0, exp = 0;
   for (const t of items) {
@@ -170,7 +184,7 @@ async function onListClick(e) {
   if (del && confirm('¿Borrar este movimiento?')) {
     const t = items.find(x => x.id === del.dataset.del);
     try {
-      await deleteDoc(doc(db, 'users', user.uid, 'transactions', t.id));
+      if (t.studentId && t.entryId) await delStudentTx(t); else await deleteDoc(doc(db, 'users', user.uid, 'transactions', t.id));
       if (t.sharedId) await deleteDoc(doc(db, 'shared', t.sharedId));
     } catch { toast('No se pudo borrar'); }
   }
@@ -178,9 +192,10 @@ async function onListClick(e) {
 
 /* ---------- formulario ---------- */
 function sheet(html) {
+  sub?.(); sub = null;
   modal.innerHTML = `<div class="fixed inset-0 z-50 bg-black/40 flex items-end justify-center" id="bd">
     <div class="sheet bg-[#f3f1ec] w-full max-w-md rounded-t-3xl p-5 max-h-[92vh] overflow-y-auto" style="padding-bottom:calc(1.25rem + env(safe-area-inset-bottom))">${html}</div></div>`;
-  $('#bd').onclick = e => { if (e.target.id === 'bd') modal.innerHTML = ''; };
+  $('#bd').onclick = e => { if (e.target.id === 'bd') closeSheet(); };
 }
 
 function openForm(type) {
@@ -228,7 +243,7 @@ async function save(type) {
     }
   }
   const ref = await addDoc(collection(db, 'users', user.uid, 'transactions'), data);
-  modal.innerHTML = '';
+  closeSheet();
   if (created) openShare({ id: ref.id, ...data });
   else toast('Guardado');
 }
@@ -247,7 +262,7 @@ async function openShare(t) {
       </div></div>`).join('')}
     <button id="cl" class="btn w-full bg-neutral-900 text-white mt-2">Listo</button>`);
   modal.querySelectorAll('[data-c]').forEach(b => b.onclick = () => copy(shareLink(t.sharedId, b.dataset.c)));
-  $('#cl').onclick = () => modal.innerHTML = '';
+  $('#cl').onclick = () => closeSheet();
 }
 
 /* ---------- gráficos ---------- */
@@ -305,7 +320,168 @@ function openCharts() {
       <button id="cl" class="btn w-full bg-neutral-900 text-white">Cerrar</button>`;
     $('#pv').onclick = () => { mo = shift(mo, -1); draw(); };
     $('#nx').onclick = () => { mo = shift(mo, 1); draw(); };
-    $('#cl').onclick = () => modal.innerHTML = '';
+    $('#cl').onclick = () => closeSheet();
   };
   draw();
+}
+
+/* =====================  ALUMNOS  =====================
+   users/{uid}/students/{sid}            -> name, rate, notes, active, balance (cacheado)
+   users/{uid}/students/{sid}/entries/{eid} -> kind: 'class' | 'payment', date, amount, hours, rate, concept, txId
+   users/{uid}/transactions/{tid}        -> ingresos (los pagos llevan studentId + entryId)
+   balance = pagos − clases  (negativo = te debe, positivo = adelantado)               */
+function closeSheet() { sub?.(); sub = null; curSid = null; modal.innerHTML = ''; }
+const balInfo = b => b < -0.005 ? { cls: 'text-red-600', txt: `Te debe ${eur(-b)}` } : b > 0.005 ? { cls: 'text-green-700', txt: `A favor ${eur(b)}` } : { cls: 'text-neutral-400', txt: 'Al día' };
+const stRef = id => doc(db, 'users', user.uid, 'students', id);
+const studentRow = s => { const i = balInfo(r2(s.balance || 0)); return `<li><button data-sid="${s.id}" class="w-full text-left bg-[#f3f1ec] rounded-2xl p-3 flex items-center gap-3">
+  <div class="w-10 h-10 rounded-full bg-[#14532d] text-white flex items-center justify-center num font-bold shrink-0">${esc((s.name || '?')[0].toUpperCase())}</div>
+  <div class="flex-1 min-w-0"><p class="font-semibold truncate">${esc(s.name)}</p><p class="text-xs text-neutral-500">${eur(s.rate)}/h${s.active === false ? ' · archivado' : ''}</p></div>
+  <p class="num font-bold text-right ${i.cls}">${i.txt}</p></button></li>`; };
+
+function paintStudents() {
+  if (!$('#stl')) return;
+  const act = students.filter(s => s.active !== false).sort((a, b) => (a.balance || 0) - (b.balance || 0));
+  const owed = act.reduce((t, s) => t + Math.min(0, s.balance || 0), 0);
+  $('#owed').textContent = owed < -0.005 ? `Pendiente de cobro: ${eur(-owed)}` : '';
+  $('#stl').innerHTML = act.length ? act.map(studentRow).join('') : '<li class="text-center text-neutral-500 text-sm py-4">Crea tu primer alumno con “+ Nuevo”.</li>';
+}
+
+function openStudents() {
+  const all = [...students].sort((a, b) => (a.active === false) - (b.active === false) || a.name.localeCompare(b.name));
+  sheet(`<div class="flex items-center justify-between mb-3"><h2 class="num text-xl font-bold">Alumnos</h2><button id="ns" class="btn bg-[#14532d] text-white !py-2">+ Nuevo</button></div>
+    <ul id="all" class="space-y-2">${all.map(studentRow).join('') || '<li class="text-neutral-500 text-center py-6">Aún no tienes alumnos.</li>'}</ul>
+    <button id="cl" class="btn w-full bg-neutral-900 text-white mt-4">Cerrar</button>`);
+  $('#ns').onclick = () => openStudentForm();
+  $('#cl').onclick = closeSheet;
+  $('#all').onclick = e => { const b = e.target.closest('[data-sid]'); if (b) openStudent(b.dataset.sid); };
+}
+
+function openStudentForm(s) {
+  sheet(`<form id="f" class="space-y-3"><h2 class="num text-xl font-bold">${s ? 'Editar alumno' : 'Nuevo alumno'}</h2>
+    <input id="nm" required maxlength="40" placeholder="Nombre (ej. Jan)" value="${esc(s?.name)}" class="inp">
+    <input id="rt" type="number" inputmode="decimal" step="0.5" min="0" required placeholder="Tarifa por hora (€/h)" value="${s?.rate ?? ''}" class="inp">
+    <textarea id="nt" rows="6" placeholder="Notas: fechas de examen, temas (Sintaxis, Física…)" class="inp">${esc(s?.notes)}</textarea>
+    ${s ? `<label class="flex items-center justify-between bg-white rounded-2xl p-4 font-semibold">Alumno activo<input id="ac" type="checkbox" ${s.active !== false ? 'checked' : ''} class="w-6 h-6 accent-[#14532d]"></label>` : ''}
+    <button class="btn bg-[#14532d] text-white w-full">Guardar</button>
+    <button type="button" id="cn" class="btn w-full bg-white">Cancelar</button></form>`);
+  $('#cn').onclick = () => s ? openStudent(s.id) : closeSheet();
+  $('#f').onsubmit = async e => {
+    e.preventDefault(); e.submitter.disabled = true;
+    const d = { name: $('#nm').value.trim(), rate: r2(+$('#rt').value), notes: $('#nt').value.trim() };
+    try {
+      if (s) { d.active = $('#ac').checked; await updateDoc(stRef(s.id), d); openStudent(s.id); }
+      else { await addDoc(collection(db, 'users', user.uid, 'students'), { ...d, active: true, balance: 0, createdAt: serverTimestamp() }); closeSheet(); toast('Alumno creado'); }
+    } catch { toast('Error al guardar'); e.submitter.disabled = false; }
+  };
+}
+
+function openStudent(id) {
+  curSid = id; curEntries = [];
+  sheet('<div id="sp"></div>'); renderProfile();
+  sub = onSnapshot(query(collection(stRef(id), 'entries'), orderBy('date', 'desc')),
+    snap => { curEntries = snap.docs.map(d => ({ id: d.id, ...d.data() })); renderProfile(); },
+    () => toast('Error al leer el historial'));
+}
+
+const entryRow = e => e.kind === 'class'
+  ? `<li class="rounded-2xl bg-red-50 border-l-4 border-red-500 p-3 flex items-center gap-3"><i class="fa-solid fa-chalkboard-user text-red-600"></i>
+      <div class="flex-1 min-w-0"><p class="font-semibold">Clase · ${e.hours} h</p><p class="text-xs text-neutral-500 truncate">${esc(e.date)} · ${eur(e.rate)}/h${e.concept ? ' · ' + esc(e.concept) : ''}</p></div>
+      <p class="num font-bold text-red-600">−${eur(e.amount)}</p><button data-de="${e.id}" class="text-neutral-400" aria-label="Borrar"><i class="fa-regular fa-trash-can"></i></button></li>`
+  : `<li class="rounded-2xl bg-green-50 border-l-4 border-green-600 p-3 flex items-center gap-3"><i class="fa-solid fa-hand-holding-dollar text-green-700"></i>
+      <div class="flex-1 min-w-0"><p class="font-semibold">Pago recibido</p><p class="text-xs text-neutral-500 truncate">${esc(e.date)}${e.concept ? ' · ' + esc(e.concept) : ''}</p></div>
+      <p class="num font-bold text-green-700">+${eur(e.amount)}</p><button data-de="${e.id}" class="text-neutral-400" aria-label="Borrar"><i class="fa-regular fa-trash-can"></i></button></li>`;
+
+function renderProfile() {
+  const box = $('#sp'), s = students.find(x => x.id === curSid);
+  if (!box || !s) return;
+  const b = r2(s.balance || 0), i = balInfo(b);
+  box.innerHTML = `<div class="flex items-start justify-between gap-2">
+      <div class="min-w-0"><h2 class="num text-2xl font-bold truncate">${esc(s.name)}</h2><p class="text-sm text-neutral-500">${eur(s.rate)} / hora${s.active === false ? ' · archivado' : ''}</p></div>
+      <div class="flex gap-2"><button id="ed" class="w-10 h-10 rounded-full bg-white" aria-label="Editar"><i class="fa-solid fa-pen"></i></button>
+      <button id="x" class="w-10 h-10 rounded-full bg-white" aria-label="Cerrar"><i class="fa-solid fa-xmark"></i></button></div></div>
+    <div class="rounded-2xl bg-white p-4 mt-4 text-center"><p class="text-sm text-neutral-500">Balance actual</p><p class="num text-3xl font-bold ${i.cls}">${i.txt}</p>
+      <p class="text-xs text-neutral-400 mt-1">${b < -0.005 ? 'Pendiente de pago' : b > 0.005 ? 'Pagado por adelantado' : 'Cuentas a cero'}</p></div>
+    <div class="rounded-2xl bg-white p-4 mt-3"><p class="text-xs font-semibold text-neutral-500 mb-1">NOTAS</p>
+      <p class="whitespace-pre-wrap text-sm">${esc(s.notes) || '<span class="text-neutral-400">Sin notas</span>'}</p></div>
+    <div class="grid grid-cols-2 gap-3 mt-3">
+      <button id="bc" class="btn bg-neutral-900 text-white"><i class="fa-solid fa-chalkboard-user"></i> Registrar clase</button>
+      <button id="bp" class="btn bg-[#14532d] text-white"><i class="fa-solid fa-hand-holding-dollar"></i> Registrar pago</button></div>
+    <h3 class="num font-bold mt-5 mb-2">Historial</h3>
+    <ul id="hist" class="space-y-2">${curEntries.map(entryRow).join('') || '<li class="text-center text-neutral-500 text-sm py-4">Sin movimientos todavía.</li>'}</ul>`;
+  $('#x').onclick = closeSheet;
+  $('#ed').onclick = () => openStudentForm(s);
+  $('#bc').onclick = () => openClassForm(s);
+  $('#bp').onclick = () => openPaymentForm(s);
+  $('#hist').onclick = e => { const d = e.target.closest('[data-de]'); if (d) delEntry(curEntries.find(x => x.id === d.dataset.de)); };
+}
+
+function openClassForm(s) {
+  sheet(`<form id="f" class="space-y-3"><h2 class="num text-xl font-bold">Registrar clase · ${esc(s.name)}</h2>
+    <input id="dt" type="date" required value="${today()}" class="inp">
+    <input id="hr" type="number" inputmode="decimal" step="0.25" min="0.25" required placeholder="Duración en horas (ej. 1.5)" class="inp">
+    <input id="con" maxlength="60" placeholder="Concepto (opcional)" class="inp">
+    <div><label for="pd" class="text-sm font-semibold">Cuánto me ha pagado hoy (€)</label><input id="pd" type="number" inputmode="decimal" step="0.01" min="0" value="0" class="inp mt-1"></div>
+    <p class="bg-white rounded-2xl p-3 text-sm">Coste: <b id="cost" class="num">${eur(0)}</b> · Balance tras guardar: <b id="after" class="num">${eur(s.balance)}</b></p>
+    <button class="btn bg-neutral-900 text-white w-full">Guardar clase</button>
+    <button type="button" id="cn" class="btn w-full bg-white">Cancelar</button></form>`);
+  const upd = () => { const c = r2((+$('#hr').value || 0) * s.rate); $('#cost').textContent = eur(c); $('#after').textContent = eur(r2((s.balance || 0) - c + (+$('#pd').value || 0))); };
+  $('#hr').oninput = $('#pd').oninput = upd;
+  $('#cn').onclick = () => openStudent(s.id);
+  $('#f').onsubmit = async e => {
+    e.preventDefault(); e.submitter.disabled = true;
+    const date = $('#dt').value, hours = +$('#hr').value, concept = $('#con').value.trim(), paid = r2(+$('#pd').value || 0), cost = r2(hours * s.rate);
+    try {
+      // 2 en 1: todo en UN batch atómico (o se guarda todo o nada)
+      const batch = writeBatch(db), sr = stRef(s.id), cRef = doc(collection(sr, 'entries'));
+      batch.set(cRef, { kind: 'class', date, hours, rate: s.rate, amount: cost, concept, createdAt: serverTimestamp() });
+      let delta = -cost;
+      if (paid > 0) {
+        const pRef = doc(collection(sr, 'entries')), tRef = doc(collection(db, 'users', user.uid, 'transactions'));
+        batch.set(pRef, { kind: 'payment', date, amount: paid, concept: 'Pago en clase', txId: tRef.id, classId: cRef.id, createdAt: serverTimestamp() });
+        batch.set(tRef, { type: 'income', amount: paid, concept: `Clases · ${s.name}`, date, studentId: s.id, entryId: pRef.id, createdAt: serverTimestamp() });
+        delta += paid;
+      }
+      batch.update(sr, { balance: increment(r2(delta)) });
+      await batch.commit(); openStudent(s.id); toast('Clase guardada');
+    } catch (err) { console.error(err); toast('Error al guardar'); e.submitter.disabled = false; }
+  };
+}
+
+function openPaymentForm(s) {
+  sheet(`<form id="f" class="space-y-3"><h2 class="num text-xl font-bold">Registrar pago · ${esc(s.name)}</h2>
+    <input id="dt" type="date" required value="${today()}" class="inp">
+    <input id="am" type="number" inputmode="decimal" step="0.01" min="0.01" required placeholder="Cantidad (€)" class="inp num text-2xl">
+    <button class="btn bg-[#14532d] text-white w-full">Guardar pago</button>
+    <button type="button" id="cn" class="btn w-full bg-white">Cancelar</button></form>`);
+  $('#cn').onclick = () => openStudent(s.id);
+  $('#f').onsubmit = async e => {
+    e.preventDefault(); e.submitter.disabled = true;
+    const date = $('#dt').value, amount = r2(+$('#am').value);
+    try {
+      const batch = writeBatch(db), sr = stRef(s.id), pRef = doc(collection(sr, 'entries')), tRef = doc(collection(db, 'users', user.uid, 'transactions'));
+      batch.set(pRef, { kind: 'payment', date, amount, concept: '', txId: tRef.id, createdAt: serverTimestamp() });
+      batch.set(tRef, { type: 'income', amount, concept: `Pago · ${s.name}`, date, studentId: s.id, entryId: pRef.id, createdAt: serverTimestamp() });
+      batch.update(sr, { balance: increment(amount) });
+      await batch.commit(); openStudent(s.id); toast('Pago guardado');
+    } catch (err) { console.error(err); toast('Error al guardar'); e.submitter.disabled = false; }
+  };
+}
+
+async function delEntry(e) {
+  if (!e || !confirm('¿Borrar esta línea? Se revertirá el balance.')) return;
+  try {
+    const sr = stRef(curSid), batch = writeBatch(db);
+    batch.delete(doc(sr, 'entries', e.id));
+    batch.update(sr, { balance: increment(e.kind === 'class' ? e.amount : -e.amount) });
+    if (e.txId) batch.delete(doc(db, 'users', user.uid, 'transactions', e.txId));
+    await batch.commit();
+  } catch { toast('No se pudo borrar'); }
+}
+
+async function delStudentTx(t) { // borrar un pago desde la lista general también revierte al alumno
+  const sr = stRef(t.studentId), batch = writeBatch(db);
+  batch.delete(doc(db, 'users', user.uid, 'transactions', t.id));
+  batch.delete(doc(sr, 'entries', t.entryId));
+  batch.update(sr, { balance: increment(-t.amount) });
+  await batch.commit();
 }

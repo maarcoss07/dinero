@@ -1,4 +1,4 @@
-const CACHE = 'finanzas-v4';
+const CACHE = 'finanzas-v5';
 const SHELL = ['./', 'index.html', 'app.js', 'firebase-config.js', 'manifest.json', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {
