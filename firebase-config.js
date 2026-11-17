@@ -8,5 +8,5 @@ const firebaseConfig = {
   measurementId: "G-V9Z4VD70EV"
 };
 
-const OWNER_NAME = "Marcos";
-const BIZUM_PHONE = "1"; // Pon aquí tu número real para que salga en la web
+export const OWNER_NAME = "Marcos";
+export const BIZUM_PHONE = "1"; // Pon aquí tu número real para que salga en la web

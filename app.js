@@ -1,7 +1,8 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
 import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { getFirestore, collection, addDoc, doc, getDoc, updateDoc, deleteDoc, query, orderBy, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
-import { firebaseConfig, OWNER_NAME, BIZUM_PHONE } from "./firebase-config.js";
+import * as cfg from "./firebase-config.js";
+const firebaseConfig = cfg.firebaseConfig, OWNER_NAME = cfg.OWNER_NAME || "Tu amigo", BIZUM_PHONE = cfg.BIZUM_PHONE || "";
 
 const fb = initializeApp(firebaseConfig);
 const auth = getAuth(fb);
@@ -54,11 +55,11 @@ async function renderShared(id, p) {
       ${sh.paid
         ? '<div class="mt-6 rounded-2xl bg-green-100 text-green-800 p-4 font-semibold text-center"><i class="fa-solid fa-circle-check"></i> Marcado como pagado</div>'
         : `<button id="pay" class="btn bg-[#14532d] text-white w-full mt-6"><i class="fa-solid fa-check"></i> Marcar como pagado</button>
-           <div class="mt-4 rounded-2xl bg-[#f3f1ec] p-4 text-sm">
+           ${d.bizum ? `<div class="mt-4 rounded-2xl bg-[#f3f1ec] p-4 text-sm">
              <p class="font-semibold"><i class="fa-solid fa-mobile-screen"></i> Paga por Bizum al</p>
              <div class="flex items-center justify-between mt-1"><span class="num text-lg">${esc(d.bizum)}</span>
              <button id="cp" class="px-3 py-1.5 rounded-xl bg-white font-semibold">Copiar</button></div>
-             <p class="text-neutral-500 mt-2">Concepto sugerido: ${esc(d.concept)}</p></div>`}
+             <p class="text-neutral-500 mt-2">Concepto sugerido: ${esc(d.concept)}</p></div>` : ''}`}
     </div>`);
     $('#cp')?.addEventListener('click', () => copy(d.bizum));
     $('#pay')?.addEventListener('click', async e => {
